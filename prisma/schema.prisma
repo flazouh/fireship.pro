@@ -9,5 +9,6 @@ datasource db {
 
 model UploadedVideo {
     id         String   @id
+    title      String   @default("")
     uploadedAt DateTime @default(now())
 }

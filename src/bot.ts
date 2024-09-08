@@ -1,14 +1,21 @@
+import fs from "node:fs";
+import ytdl from "@distube/ytdl-core";
 import { PrismaClient } from "@prisma/client";
-import axios from "axios";
+import axios, { AxiosProxyConfig } from "axios";
 import { load } from "cheerio";
 import { config } from "dotenv";
+import ffmpeg from "fluent-ffmpeg";
 import OpenAI from "openai";
 import { Telegraf } from "telegraf";
 import { parseStringPromise } from "xml2js";
 import winston from "winston";
 import DailyRotateFile from "winston-daily-rotate-file";
 import { cleanSubtitleText } from "./cleanSubtitleText";
-
+import { formatTime } from "./formatTime";
+import { summarizeDescription } from "./summarizeDescription";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { checkAndUploadNewVideo } from "./checkAndUploadNewVideo";
+import { Markup } from "telegraf";
 config();
 
 const prisma = new PrismaClient();
@@ -17,13 +24,10 @@ if (!TELEGRAM_BOT_TOKEN) {
 	throw new Error("TELEGRAM_BOT_TOKEN is not set");
 }
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+export const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const FIRESHIP_CHANNEL_ID = "UCsBjURrPoezykLs9EqgamOA";
 const VIDEO_CHANNEL_ID = process.env.VIDEO_CHANNEL_ID;
-if (!VIDEO_CHANNEL_ID) {
-	throw new Error("VIDEO_CHANNEL_ID is not set");
-}
 
 interface Video {
 	id: string;
@@ -33,17 +37,21 @@ interface Video {
 }
 
 // Logger configuration
-const logger = winston.createLogger({
+export const logger = winston.createLogger({
 	level: "info",
 	format: winston.format.combine(
 		winston.format.timestamp(),
 		winston.format.errors({ stack: true }),
 		winston.format.splat(),
-		winston.format.printf(({ level, message, timestamp }) => {
-			const msg = `${timestamp} [${level}]: ${message}`;
+		winston.format.printf(({ level, message, timestamp, ...metadata }) => {
+			let msg = `${timestamp} [${level}]: ${message}`;
+			if (Object.keys(metadata).length > 0) {
+				msg += ` ${JSON.stringify(metadata)}`;
+			}
 			return msg;
 		}),
 	),
+	defaultMeta: { service: "telegram-bot" },
 	transports: [
 		new winston.transports.Console({
 			format: winston.format.combine(winston.format.colorize(), winston.format.simple()),
@@ -55,35 +63,25 @@ const logger = winston.createLogger({
 			maxSize: "20m",
 			maxFiles: "14d",
 		}),
-		new winston.transports.File({
-			filename: "logs/error.log",
-			level: "error",
-			format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
-		}),
 	],
 });
 
-// Custom transport to send error messages to Telegram
-const telegramTransport = new winston.transports.Stream({
-	stream: new (require("node:stream").Writable)({
-		write(chunk, encoding, callback) {
-			const errorMessage = chunk.toString();
-			bot.telegram
-				.sendMessage(VIDEO_CHANNEL_ID, `Error: ${errorMessage}`)
-				.catch((err) => console.error("Failed to send error message to Telegram:", err));
-			callback();
-		},
-	}),
-	level: "error",
-});
+function getProxyAgent(): HttpsProxyAgent<string> | null {
+	const proxyUrl = process.env.PROXY_URL;
+	if (!proxyUrl) {
+		logger.error("Proxy URL is not set");
+		return null;
+	}
+	return new HttpsProxyAgent(proxyUrl);
+}
 
-logger.add(telegramTransport);
-
-async function getLatestFireshipVideo(): Promise<Video | null> {
+export async function getLatestFireshipVideo(): Promise<Video | null> {
 	logger.info("Fetching latest Fireship video");
+
 	try {
 		const response = await axios.get(
 			`https://www.youtube.com/feeds/videos.xml?channel_id=${FIRESHIP_CHANNEL_ID}`,
+			{ httpsAgent: getProxyAgent() },
 		);
 		const result = await parseStringPromise(response.data);
 		const latestVideo = result.feed.entry[0];
@@ -105,131 +103,168 @@ async function getLatestFireshipVideo(): Promise<Video | null> {
 	}
 }
 
-async function translateSubs(subtitles: Subtitle[], language: string): Promise<Subtitle[]> {
-	logger.info("Starting subtitle translation", { language, subtitleCount: subtitles.length });
-	if (!subtitles) return subtitles;
-	for (const subtitle of subtitles.slice(0, 5)) {
-		logger.info("Translating subtitle:", subtitle.text);
-		try {
-			const completion = await openai.chat.completions.create({
-				model: "gpt-4-turbo-preview", // Use an appropriate model
-				messages: [
-					{
-						role: "system",
-						content: JSON.stringify({
-							role: "AI assistant",
-							task: "Translate and improve subtitles",
-							instructions: `Provide only the translation to ${language} without any additional content in JSON format ({"translation": "..."})`,
-						}),
-					},
-					{
-						role: "user",
-						content: JSON.stringify({
-							action: "translate",
-							target_language: language,
-							text: subtitle.text,
-							instructions: `Provide only the translation to ${language} without any additional content`,
-						}),
-					},
-				],
-				response_format: { type: "json_object" },
-			});
-			logger.info("Translation:", completion.choices[0].message.content);
-			const translation = JSON.parse(completion.choices[0].message.content || "{}");
-			subtitle.text = translation.translation || subtitle.text;
-		} catch (error) {
-			console.error("Error translating subtitle:", error);
-			// Keep original text if translation fails
-		}
-	}
-	return subtitles;
-}
+export async function downloadVideo(videoId: string): Promise<string> {
+	logger.info("Starting video download", { videoId });
+	logger.info("Downloading video:", videoId);
+	const outputPath = `./temp_${videoId}.mp4`;
 
-interface Subtitle {
+	return new Promise((resolve, reject) => {
+		let downloadedBytes = 0;
+		let totalBytes = 0;
+		const proxyURL = process.env.PROXY_URL;
+		if (!proxyURL) {
+			logger.error("Proxy URL is not set");
+			reject(new Error("Proxy URL is not set"));
+			return;
+		}
+		// agent should be created once if you don't want to change your cookie
+		const ytdlAgent = ytdl.createProxyAgent({ uri: proxyURL });
+		const url = `https://www.youtube.com/watch?v=${videoId}`;
+		logger.info("URL:", url);
+		const stream = ytdl(url, {
+			quality: "highestvideo",
+			filter: "videoandaudio",
+			agent: ytdlAgent,
+		})
+			.on("progress", (_, downloaded, total) => {
+				downloadedBytes = downloaded;
+				if (total > totalBytes) {
+					totalBytes = total;
+				}
+				const progress = ((downloadedBytes / totalBytes) * 100).toFixed(2);
+				logger.info(`Downloading: ${progress}% (${downloadedBytes}/${totalBytes} bytes)`);
+			})
+			.pipe(fs.createWriteStream(outputPath));
+
+		stream.on("finish", () => {
+			logger.info("Video download completed", { videoId, outputPath });
+			logger.info("Download completed");
+			resolve(outputPath);
+		});
+		stream.on("error", (error) => {
+			logger.error("Video download error", { videoId, error });
+			console.error("Download error:", error);
+			reject(error);
+		});
+	});
+}
+export interface Subtitle {
 	text: string;
 	startTime: number;
 	endTime: number;
 }
-
-async function uploadVideoToTelegram(video: Video, subtitles: Subtitle[]): Promise<number> {
-	logger.info("Sending video link to Telegram", { videoTitle: video.title });
+export async function uploadVideoToTelegram(
+	videoPath: string,
+	video: Video,
+	subtitles: Subtitle[],
+): Promise<number> {
+	logger.info("Starting video upload to Telegram", { videoTitle: video.title });
 	try {
-		const descriptionSummary = await summarizeDescription(subtitles, video.description);
-		const videoUrl = `https://www.youtube.com/watch?v=${video.id}`;
-		const message = await bot.telegram.sendMessage(
-			VIDEO_CHANNEL_ID as string,
-			`🎉 New Fireship video: \n\n${video.title}\n\n${descriptionSummary}\n\n${videoUrl}`,
-			{ parse_mode: "HTML" },
-		);
+		logger.info("Video path:", videoPath);
 
-		logger.info("Video link successfully sent to Telegram", { messageId: message.message_id });
+		const videoFile = { source: videoPath };
+		logger.info(`Uploading video to Telegram: ${video.title}`);
+
+		const descriptionSummary = await summarizeDescription(subtitles, video.description);
+		const message = await bot.telegram.sendVideo(VIDEO_CHANNEL_ID as string, videoFile, {
+			caption: `🎉 New Fireship video: \n\n${video.title}\n\n${descriptionSummary}`,
+		});
+
+		// Save the video with its title
+		await setLastUploadedVideoId(video.id, video.title);
+
+		logger.info("Video successfully uploaded to Telegram", { messageId: message.message_id });
+		logger.info("Video uploaded to Telegram:", message);
+		logger.info("Deleting temporary video file:", videoPath);
+		fs.unlinkSync(videoPath); // Delete the temporary video file
 		return message.message_id;
 	} catch (error) {
-		logger.error("Error sending video link to Telegram", { error });
+		logger.error("Error uploading video to Telegram", { error });
+		console.error("Error uploading video to Telegram:", error);
 		throw error;
 	}
 }
-
-function getFixedSubtitles(subtitles: Subtitle[] | null): Subtitle[] {
-	if (!subtitles) return [];
-	// Sort subtitles by start time to ensure proper order
-	const sortedSubtitles = [...subtitles].sort((a, b) => a.startTime - b.startTime);
-	const fixedSubtitles: Subtitle[] = [];
-
-	for (let i = 0; i < sortedSubtitles.length - 1; i++) {
-		const current = sortedSubtitles[i];
-		const next = sortedSubtitles[i + 1];
-
-		// Put the end of the first subtitle at the beginning of the second
-		const adjustedEndTime = next.startTime;
-
-		fixedSubtitles.push({
-			...current,
-			endTime: adjustedEndTime,
-		});
-	}
-
-	// Add the last subtitle without modification
-	fixedSubtitles.push(sortedSubtitles[sortedSubtitles.length - 1]);
-
-	return fixedSubtitles;
-}
-
-async function checkAndUploadNewVideo(): Promise<void> {
-	logger.info("Checking for new videos");
-	const video = await getLatestFireshipVideo();
-	if (!video) {
-		logger.error("No video found");
-		return;
-	}
-
-	const lastUploadedVideoId = await getLastUploadedVideoId();
-	if (video.id === lastUploadedVideoId) {
-		logger.info("No new videos found");
-		return;
-	}
-
-	const subtitles = await getSubtitles(video.id);
-	await uploadVideoToTelegram(video, subtitles);
-	await setLastUploadedVideoId(video.id);
-	logger.info("Video link sent successfully", { videoId: video.id });
-}
-
 // Update these functions to use Prisma
-async function getLastUploadedVideoId(): Promise<string> {
+export async function getLastUploadedVideoId(): Promise<string> {
 	const lastVideo = await prisma.uploadedVideo.findFirst({
 		orderBy: { uploadedAt: "desc" },
 	});
 	return lastVideo?.id ?? "";
 }
 
-async function setLastUploadedVideoId(videoId: string): Promise<void> {
+export async function setLastUploadedVideoId(videoId: string, title: string): Promise<void> {
 	await prisma.uploadedVideo.upsert({
 		where: { id: videoId },
-		update: { uploadedAt: new Date() },
-		create: { id: videoId },
+		update: { uploadedAt: new Date(), title },
+		create: { id: videoId, title },
 	});
 }
+
+// Add this function to fetch the last 5 videos
+async function getLastFiveVideos(): Promise<{ id: string; title: string }[]> {
+	try {
+		const videos = await prisma.uploadedVideo.findMany({
+			take: 5,
+			orderBy: { uploadedAt: "desc" },
+			select: { id: true, title: true },
+		});
+		return videos;
+	} catch (error) {
+		logger.error("Error fetching last five videos", { error });
+		throw error;
+	}
+}
+
+// Add this function to delete a video
+async function deleteVideo(videoId: string): Promise<void> {
+	try {
+		await prisma.uploadedVideo.delete({
+			where: { id: videoId },
+		});
+		logger.info("Video deleted successfully", { videoId });
+	} catch (error) {
+		logger.error("Error deleting video", { videoId, error });
+		throw error;
+	}
+}
+
+// Add these command handlers
+bot.command("list", async (ctx) => {
+	try {
+		const videos = await getLastFiveVideos();
+		if (videos.length === 0) {
+			await ctx.reply("No videos have been uploaded yet.");
+			return;
+		}
+
+		const message = videos
+			.map((video, index) => `${index + 1}. ${video.title || video.id}`)
+			.join("\n");
+
+		const keyboard = Markup.inlineKeyboard(
+			videos.map((video, index) =>
+				Markup.button.callback(`Delete ${index + 1}`, `delete:${video.id}`),
+			),
+		);
+
+		await ctx.reply(message, keyboard);
+	} catch (error) {
+		logger.error("Error handling /list command", { error });
+		await ctx.reply("An error occurred while fetching the video list.");
+	}
+});
+
+bot.action(/^delete:(.+)$/, async (ctx) => {
+	if (!ctx.match) return;
+	const videoId = ctx.match[1];
+	try {
+		await deleteVideo(videoId);
+		await ctx.answerCbQuery(`Video ${videoId} has been deleted.`);
+	} catch (error) {
+		logger.error("Error handling delete action", { videoId, error });
+		await ctx.answerCbQuery("An error occurred while deleting the video.", { show_alert: true });
+	}
+});
 
 // Update the main function to initialize Prisma
 async function main() {
@@ -263,7 +298,6 @@ process.once("SIGTERM", async () => {
 	bot.stop("SIGTERM");
 	await prisma.$disconnect();
 });
-
 declare global {
 	interface String {
 		capitalize(): string;
@@ -272,19 +306,29 @@ declare global {
 String.prototype.capitalize = function () {
 	return this.charAt(0).toUpperCase() + this.slice(1);
 };
-
-async function getSubtitles(id: string): Promise<Subtitle[]> {
+export async function getSubtitles(id: string): Promise<Subtitle[]> {
 	logger.info("Fetching subtitles", { videoId: id });
+
 	try {
-		const response = await axios.get(`https://www.youtube.com/watch?v=${id}`);
+		const proxyURL = process.env.PROXY_URL;
+		if (!proxyURL) {
+			logger.error("Proxy URL is not set");
+			throw new Error("Proxy URL is not set");
+		}
+		const proxyConfig = {
+			host: proxyURL.split(":")[0],
+			port: Number.parseInt(proxyURL.split(":")[1]),
+		} satisfies AxiosProxyConfig;
+		const response = await axios.get(`https://www.youtube.com/watch?v=${id}`, {
+			proxy: proxyConfig,
+			timeout: 10000,
+		});
 		if (!response.data) throw new Error("Failed to fetch video");
 		if (typeof response.data !== "string") throw new Error("Invalid response data");
 		if (response.status !== 200) throw new Error("Failed to fetch video");
 		const html = response.data;
-		logger.info("HTML:", html);
 		// Extract the ytInitialPlayerResponse from the HTML
 		const match = html.match(/ytInitialPlayerResponse\s*=\s*({.*?});/);
-		logger.info("Match:", match);
 		if (!match) throw new Error("Failed to extract ytInitialPlayerResponse");
 
 		const playerResponse = JSON.parse(match[1]);
@@ -293,14 +337,16 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 
 		if (!captionTracks || captionTracks.length === 0) {
 			logger.error(`No captions found for video ${id}: ${JSON.stringify(html)}`);
-			return [];
+			throw new Error(`No captions found for video ${id}`);
 		}
 
 		// Prefer English captions, fallback to the first available
 		const captionTrack =
 			captionTracks.find((track) => track.languageCode === "en") || captionTracks[0];
 
-		const subtitlesResponse = await axios.get(captionTrack.baseUrl);
+		const subtitlesResponse = await axios.get(captionTrack.baseUrl, {
+			proxy: proxyConfig,
+		});
 		const subtitlesXml = subtitlesResponse.data;
 
 		// Parse XML and extract text using cheerio
@@ -325,38 +371,53 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 	} catch (error) {
 		logger.error("Error fetching subtitles", { videoId: id, error });
 		console.error("Error fetching subtitles:", error);
-		return [];
+		throw error;
 	}
 }
 
-async function summarizeDescription(subtitles: Subtitle[], description: string): Promise<string> {
-	logger.info("Summarizing video description");
-	const content = `
-  Description: ${description}
-  Subtitles: ${subtitles.map((sub) => sub.text).join(" ")}
-  `;
-	const completion = await openai.chat.completions.create({
-		model: "gpt-4o-mini", // Use an appropriate model
-		messages: [
-			{
-				role: "system",
-				content: JSON.stringify({
-					role: "AI assistant",
-					task: "Summarize the description",
-					instructions: `Provide only the summary of the description in JSON format ({"summary": "..."}) without any additional content, start with "Summary: "`,
-				}),
-			},
-			{
-				role: "user",
-				content: content,
-			},
-		],
-		response_format: { type: "json_object" },
-	});
-	logger.info("Description summarized successfully", {
-		summary: completion.choices[0].message.content,
-	});
-	logger.info("Summary:", completion.choices[0].message.content);
-	const summary = JSON.parse(completion.choices[0].message.content || "{}");
-	return summary.summary || "";
+export async function addSubtitlesToVideo(
+	videoPath: string,
+	translatedSubs: Subtitle[] | null,
+): Promise<string> {
+	logger.info("Adding subtitles to video", { videoPath });
+	// Generate a temporary SRT file from translatedSubs
+	if (!translatedSubs) return videoPath;
+	const srtContent = translatedSubs
+		.map((sub, index) => {
+			const startTime = formatTime(sub.startTime);
+			const endTime = formatTime(sub.endTime);
+			return `${index + 1}\n${startTime} --> ${endTime}\n${sub.text}\n\n`;
+		})
+		.join("");
+
+	const tempSrtPath = `temp_${Date.now()}.srt`;
+	await fs.promises.writeFile(tempSrtPath, srtContent);
+
+	// Generate output video path
+	const outputPath = `output_${Date.now()}.mp4`;
+
+	try {
+		// Use ffmpeg to add subtitles to the video
+		await new Promise<void>((resolve, reject) => {
+			ffmpeg(videoPath)
+				.outputOptions("-vf", `subtitles=${tempSrtPath}:force_style='FontSize=24'`)
+				.output(outputPath)
+				.on("end", () => resolve())
+				.on("error", (err) => reject(err))
+				.run();
+		});
+
+		// Update video object with new file path
+		const updatedVideo: string = outputPath;
+
+		// Clean up temporary SRT file
+		await fs.promises.unlink(tempSrtPath);
+
+		logger.info("Subtitles added successfully", { outputPath });
+		return updatedVideo;
+	} catch (error) {
+		logger.error("Error adding subtitles to video", { videoPath, error });
+		console.error("Error adding subtitles to video:", error);
+		throw error;
+	}
 }
