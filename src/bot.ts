@@ -8,9 +8,9 @@ import ffmpeg from "fluent-ffmpeg";
 import OpenAI from "openai";
 import { Telegraf } from "telegraf";
 import { parseStringPromise } from "xml2js";
-import { JSDOM } from "jsdom";
 import winston from "winston";
 import DailyRotateFile from "winston-daily-rotate-file";
+import { cleanSubtitleText } from "./cleanSubtitleText";
 
 config();
 
@@ -39,7 +39,13 @@ const logger = winston.createLogger({
 		winston.format.timestamp(),
 		winston.format.errors({ stack: true }),
 		winston.format.splat(),
-		winston.format.json(),
+		winston.format.printf(({ level, message, timestamp, ...metadata }) => {
+			let msg = `${timestamp} [${level}]: ${message}`;
+			if (Object.keys(metadata).length > 0) {
+				msg += ` ${JSON.stringify(metadata)}`;
+			}
+			return msg;
+		}),
 	),
 	defaultMeta: { service: "telegram-bot" },
 	transports: [
@@ -86,7 +92,7 @@ async function translateSubs(subtitles: Subtitle[], language: string): Promise<S
 	logger.info("Starting subtitle translation", { language, subtitleCount: subtitles.length });
 	if (!subtitles) return subtitles;
 	for (const subtitle of subtitles.slice(0, 5)) {
-		console.log("Translating subtitle:", subtitle.text);
+		logger.info("Translating subtitle:", subtitle.text);
 		try {
 			const completion = await openai.chat.completions.create({
 				model: "gpt-4-turbo-preview", // Use an appropriate model
@@ -111,7 +117,7 @@ async function translateSubs(subtitles: Subtitle[], language: string): Promise<S
 				],
 				response_format: { type: "json_object" },
 			});
-			console.log("Translation:", completion.choices[0].message.content);
+			logger.info("Translation:", completion.choices[0].message.content);
 			const translation = JSON.parse(completion.choices[0].message.content || "{}");
 			subtitle.text = translation.translation || subtitle.text;
 		} catch (error) {
@@ -124,14 +130,14 @@ async function translateSubs(subtitles: Subtitle[], language: string): Promise<S
 
 async function downloadVideo(videoId: string): Promise<string> {
 	logger.info("Starting video download", { videoId });
-	console.log("Downloading video:", videoId);
+	logger.info("Downloading video:", videoId);
 	const outputPath = `./temp_${videoId}.mp4`;
 	return new Promise((resolve, reject) => {
 		let downloadedBytes = 0;
 		let totalBytes = 0;
 
 		const url = `https://www.youtube.com/watch?v=${videoId}`;
-		console.log("URL:", url);
+		logger.info("URL:", url);
 		const stream = ytdl(url, {
 			quality: "highestvideo",
 			filter: "videoandaudio",
@@ -142,13 +148,13 @@ async function downloadVideo(videoId: string): Promise<string> {
 					totalBytes = total;
 				}
 				const progress = ((downloadedBytes / totalBytes) * 100).toFixed(2);
-				console.log(`Downloading: ${progress}% (${downloadedBytes}/${totalBytes} bytes)`);
+				logger.info(`Downloading: ${progress}% (${downloadedBytes}/${totalBytes} bytes)`);
 			})
 			.pipe(fs.createWriteStream(outputPath));
 
 		stream.on("finish", () => {
 			logger.info("Video download completed", { videoId, outputPath });
-			console.log("Download completed");
+			logger.info("Download completed");
 			resolve(outputPath);
 		});
 		stream.on("error", (error) => {
@@ -170,10 +176,10 @@ async function uploadVideoToTelegram(
 ): Promise<number> {
 	logger.info("Starting video upload to Telegram", { videoTitle: video.title });
 	try {
-		console.log("Video path:", videoPath);
+		logger.info("Video path:", videoPath);
 
 		const videoFile = { source: videoPath };
-		console.log(`Uploading video to Telegram: ${video.title}`);
+		logger.info(`Uploading video to Telegram: ${video.title}`);
 
 		const descriptionSummary = await summarizeDescription(subtitles);
 		const message = await bot.telegram.sendVideo(VIDEO_CHANNEL_ID, videoFile, {
@@ -181,8 +187,8 @@ async function uploadVideoToTelegram(
 		});
 
 		logger.info("Video successfully uploaded to Telegram", { messageId: message.message_id });
-		console.log("Video uploaded to Telegram:", message);
-		console.log("Deleting temporary video file:", videoPath);
+		logger.info("Video uploaded to Telegram:", message);
+		logger.info("Deleting temporary video file:", videoPath);
 		fs.unlinkSync(videoPath); // Delete the temporary video file
 		return message.message_id;
 	} catch (error) {
@@ -235,6 +241,7 @@ async function checkAndUploadNewVideo(): Promise<void> {
 	const videoWithSubsPath = await addSubtitlesToVideo(videoPath, fixedSubtitles);
 	await uploadVideoToTelegram(videoWithSubsPath, video, fixedSubtitles);
 	await setLastUploadedVideoId(video.id);
+	logger.info("Video uploaded successfully", { videoId: video.id });
 }
 
 // Update these functions to use Prisma
@@ -255,15 +262,20 @@ async function setLastUploadedVideoId(videoId: string): Promise<void> {
 
 // Update the main function to initialize Prisma
 async function main() {
-	logger.info("Starting bot");
-	await prisma.$connect();
-	logger.info("Database connection successful");
-	bot.launch();
-	logger.info("Bot is running");
-	setInterval(checkAndUploadNewVideo, 60 * 60 * 1000); // Check every hour
-	logger.info("Interval set for checking new videos");
-	logger.info("Starting the bot...");
-	checkAndUploadNewVideo();
+	try {
+		logger.info("Starting bot");
+		await prisma.$connect();
+		logger.info("Database connection successful");
+		bot.launch();
+		logger.info("Bot is running");
+		setInterval(checkAndUploadNewVideo, 60 * 60 * 1000); // Check every hour
+		logger.info("Interval set for checking new videos");
+		logger.info("Starting the bot...");
+		checkAndUploadNewVideo();
+	} catch (error) {
+		logger.error("Error starting bot", { error });
+		console.error("Error starting bot:", error);
+	}
 }
 
 // Run the main function
@@ -299,6 +311,7 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 		if (!match) throw new Error("Failed to extract ytInitialPlayerResponse");
 
 		const playerResponse = JSON.parse(match[1]);
+		logger.info("Player response:", JSON.stringify(playerResponse, null, 2));
 		const captionTracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks;
 
 		if (!captionTracks || captionTracks.length === 0) {
@@ -321,7 +334,7 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 				const text = cleanSubtitleText($(node).text()).capitalize();
 				const startString = $(node).attr("start") || "0";
 				const durationString = $(node).attr("dur") || "0";
-				console.log("Subtitle:", text, startString, durationString);
+				logger.info("Subtitle:", text, startString, durationString);
 				const startTime = Number.parseFloat(startString);
 				const endTime = startTime + Number.parseFloat(durationString);
 				if (!startTime || !endTime) return null;
@@ -329,28 +342,13 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 			})
 			.get();
 		logger.info("Subtitles fetched successfully", { videoId: id, subtitleCount: subtitles.length });
-		console.log(subtitles);
+		logger.info(subtitles);
 		return subtitles.filter((subtitle) => subtitle !== null);
 	} catch (error) {
 		logger.error("Error fetching subtitles", { videoId: id, error });
 		console.error("Error fetching subtitles:", error);
 		throw error;
 	}
-}
-
-function cleanSubtitleText(text: string): string {
-	const dom = new JSDOM("<!DOCTYPE html>");
-	return text
-		.replace(/&(#?[a-zA-Z0-9]+);/g, (match, entity) => {
-			const decoded = new dom.window.DOMParser().parseFromString(`&${entity};`, "text/html").body
-				.textContent;
-			return decoded || match;
-		})
-		.replace(/\\(\d{3})([a-zA-Z])/g, (_, octal, char) => {
-			const decodedChar = String.fromCharCode(Number.parseInt(octal, 8));
-			return decodedChar + char;
-		})
-		.trim();
 }
 
 async function addSubtitlesToVideo(videoPath: string, translatedSubs: Subtitle[]): Promise<string> {
@@ -427,7 +425,7 @@ async function summarizeDescription(subtitles: Subtitle[]): Promise<string> {
 	logger.info("Description summarized successfully", {
 		summary: completion.choices[0].message.content,
 	});
-	console.log("Summary:", completion.choices[0].message.content);
+	logger.info("Summary:", completion.choices[0].message.content);
 	const summary = JSON.parse(completion.choices[0].message.content || "{}");
 	return summary.summary || "";
 }
