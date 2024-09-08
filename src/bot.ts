@@ -1,10 +1,7 @@
-import fs from "node:fs";
-import ytdl from "@distube/ytdl-core";
 import { PrismaClient } from "@prisma/client";
 import axios from "axios";
 import { load } from "cheerio";
 import { config } from "dotenv";
-import ffmpeg from "fluent-ffmpeg";
 import OpenAI from "openai";
 import { Telegraf } from "telegraf";
 import { parseStringPromise } from "xml2js";
@@ -24,6 +21,9 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const FIRESHIP_CHANNEL_ID = "UCsBjURrPoezykLs9EqgamOA";
 const VIDEO_CHANNEL_ID = process.env.VIDEO_CHANNEL_ID;
+if (!VIDEO_CHANNEL_ID) {
+	throw new Error("VIDEO_CHANNEL_ID is not set");
+}
 
 interface Video {
 	id: string;
@@ -39,15 +39,11 @@ const logger = winston.createLogger({
 		winston.format.timestamp(),
 		winston.format.errors({ stack: true }),
 		winston.format.splat(),
-		winston.format.printf(({ level, message, timestamp, ...metadata }) => {
-			let msg = `${timestamp} [${level}]: ${message}`;
-			if (Object.keys(metadata).length > 0) {
-				msg += ` ${JSON.stringify(metadata)}`;
-			}
+		winston.format.printf(({ level, message, timestamp }) => {
+			const msg = `${timestamp} [${level}]: ${message}`;
 			return msg;
 		}),
 	),
-	defaultMeta: { service: "telegram-bot" },
 	transports: [
 		new winston.transports.Console({
 			format: winston.format.combine(winston.format.colorize(), winston.format.simple()),
@@ -128,75 +124,31 @@ async function translateSubs(subtitles: Subtitle[], language: string): Promise<S
 	return subtitles;
 }
 
-async function downloadVideo(videoId: string): Promise<string> {
-	logger.info("Starting video download", { videoId });
-	logger.info("Downloading video:", videoId);
-	const outputPath = `./temp_${videoId}.mp4`;
-	return new Promise((resolve, reject) => {
-		let downloadedBytes = 0;
-		let totalBytes = 0;
-
-		const url = `https://www.youtube.com/watch?v=${videoId}`;
-		logger.info("URL:", url);
-		const stream = ytdl(url, {
-			quality: "highestvideo",
-			filter: "videoandaudio",
-		})
-			.on("progress", (_, downloaded, total) => {
-				downloadedBytes = downloaded;
-				if (total > totalBytes) {
-					totalBytes = total;
-				}
-				const progress = ((downloadedBytes / totalBytes) * 100).toFixed(2);
-				logger.info(`Downloading: ${progress}% (${downloadedBytes}/${totalBytes} bytes)`);
-			})
-			.pipe(fs.createWriteStream(outputPath));
-
-		stream.on("finish", () => {
-			logger.info("Video download completed", { videoId, outputPath });
-			logger.info("Download completed");
-			resolve(outputPath);
-		});
-		stream.on("error", (error) => {
-			logger.error("Video download error", { videoId, error });
-			console.error("Download error:", error);
-			reject(error);
-		});
-	});
-}
 interface Subtitle {
 	text: string;
 	startTime: number;
 	endTime: number;
 }
-async function uploadVideoToTelegram(
-	videoPath: string,
-	video: Video,
-	subtitles: Subtitle[] | null,
-): Promise<number> {
-	logger.info("Starting video upload to Telegram", { videoTitle: video.title });
+
+async function uploadVideoToTelegram(video: Video, subtitles: Subtitle[]): Promise<number> {
+	logger.info("Sending video link to Telegram", { videoTitle: video.title });
 	try {
-		logger.info("Video path:", videoPath);
-
-		const videoFile = { source: videoPath };
-		logger.info(`Uploading video to Telegram: ${video.title}`);
-
 		const descriptionSummary = await summarizeDescription(subtitles, video.description);
-		const message = await bot.telegram.sendVideo(VIDEO_CHANNEL_ID, videoFile, {
-			caption: `🎉 New Fireship video: \n\n${video.title}\n\n${descriptionSummary}`,
-		});
+		const videoUrl = `https://www.youtube.com/watch?v=${video.id}`;
+		const message = await bot.telegram.sendMessage(
+			VIDEO_CHANNEL_ID as string,
+			`🎉 New Fireship video: \n\n${video.title}\n\n${descriptionSummary}\n\n${videoUrl}`,
+			{ parse_mode: "HTML" },
+		);
 
-		logger.info("Video successfully uploaded to Telegram", { messageId: message.message_id });
-		logger.info("Video uploaded to Telegram:", message);
-		logger.info("Deleting temporary video file:", videoPath);
-		fs.unlinkSync(videoPath); // Delete the temporary video file
+		logger.info("Video link successfully sent to Telegram", { messageId: message.message_id });
 		return message.message_id;
 	} catch (error) {
-		logger.error("Error uploading video to Telegram", { error });
-		console.error("Error uploading video to Telegram:", error);
+		logger.error("Error sending video link to Telegram", { error });
 		throw error;
 	}
 }
+
 function getFixedSubtitles(subtitles: Subtitle[] | null): Subtitle[] {
 	if (!subtitles) return [];
 	// Sort subtitles by start time to ensure proper order
@@ -221,6 +173,7 @@ function getFixedSubtitles(subtitles: Subtitle[] | null): Subtitle[] {
 
 	return fixedSubtitles;
 }
+
 async function checkAndUploadNewVideo(): Promise<void> {
 	logger.info("Checking for new videos");
 	const video = await getLatestFireshipVideo();
@@ -236,13 +189,9 @@ async function checkAndUploadNewVideo(): Promise<void> {
 	}
 
 	const subtitles = await getSubtitles(video.id);
-	const fixedSubtitles = getFixedSubtitles(subtitles);
-	// const translatedSubs = await translateSubs(fixedSubtitles, "Russian");
-	const videoPath = await downloadVideo(video.id);
-	const videoWithSubsPath = await addSubtitlesToVideo(videoPath, fixedSubtitles);
-	await uploadVideoToTelegram(videoWithSubsPath, video, fixedSubtitles);
+	await uploadVideoToTelegram(video, subtitles);
 	await setLastUploadedVideoId(video.id);
-	logger.info("Video uploaded successfully", { videoId: video.id });
+	logger.info("Video link sent successfully", { videoId: video.id });
 }
 
 // Update these functions to use Prisma
@@ -272,7 +221,7 @@ async function main() {
 		setInterval(checkAndUploadNewVideo, 60 * 60 * 1000); // Check every hour
 		logger.info("Interval set for checking new videos");
 		logger.info("Starting the bot...");
-		checkAndUploadNewVideo();
+		await checkAndUploadNewVideo();
 	} catch (error) {
 		logger.error("Error starting bot", { error });
 		console.error("Error starting bot:", error);
@@ -293,6 +242,7 @@ process.once("SIGTERM", async () => {
 	bot.stop("SIGTERM");
 	await prisma.$disconnect();
 });
+
 declare global {
 	interface String {
 		capitalize(): string;
@@ -301,7 +251,8 @@ declare global {
 String.prototype.capitalize = function () {
 	return this.charAt(0).toUpperCase() + this.slice(1);
 };
-async function getSubtitles(id: string): Promise<Subtitle[] | null> {
+
+async function getSubtitles(id: string): Promise<Subtitle[]> {
 	logger.info("Fetching subtitles", { videoId: id });
 	try {
 		const response = await axios.get(`https://www.youtube.com/watch?v=${id}`);
@@ -357,63 +308,12 @@ async function getSubtitles(id: string): Promise<Subtitle[] | null> {
 	}
 }
 
-async function addSubtitlesToVideo(
-	videoPath: string,
-	translatedSubs: Subtitle[] | null,
-): Promise<string> {
-	logger.info("Adding subtitles to video", { videoPath });
-	// Generate a temporary SRT file from translatedSubs
-	if (!translatedSubs) return videoPath;
-	const srtContent = translatedSubs
-		.map((sub, index) => {
-			const startTime = formatTime(sub.startTime);
-			const endTime = formatTime(sub.endTime);
-			return `${index + 1}\n${startTime} --> ${endTime}\n${sub.text}\n\n`;
-		})
-		.join("");
-
-	const tempSrtPath = `temp_${Date.now()}.srt`;
-	await fs.promises.writeFile(tempSrtPath, srtContent);
-
-	// Generate output video path
-	const outputPath = `output_${Date.now()}.mp4`;
-
-	try {
-		// Use ffmpeg to add subtitles to the video
-		await new Promise<void>((resolve, reject) => {
-			ffmpeg(videoPath)
-				.outputOptions("-vf", `subtitles=${tempSrtPath}:force_style='FontSize=24'`)
-				.output(outputPath)
-				.on("end", () => resolve())
-				.on("error", (err) => reject(err))
-				.run();
-		});
-
-		// Update video object with new file path
-		const updatedVideo: string = outputPath;
-
-		// Clean up temporary SRT file
-		await fs.promises.unlink(tempSrtPath);
-
-		logger.info("Subtitles added successfully", { outputPath });
-		return updatedVideo;
-	} catch (error) {
-		logger.error("Error adding subtitles to video", { videoPath, error });
-		console.error("Error adding subtitles to video:", error);
-		throw error;
-	}
-}
-
-function formatTime(seconds: number): string {
-	const date = new Date(seconds * 1000);
-	const hours = date.getUTCHours().toString().padStart(2, "0");
-	const minutes = date.getUTCMinutes().toString().padStart(2, "0");
-	const secs = date.getUTCSeconds().toString().padStart(2, "0");
-	const ms = date.getUTCMilliseconds().toString().padStart(3, "0");
-	return `${hours}:${minutes}:${secs},${ms}`;
-}
 async function summarizeDescription(subtitles: Subtitle[], description: string): Promise<string> {
 	logger.info("Summarizing video description");
+	const content = `
+  Description: ${description}
+  Subtitles: ${subtitles.map((sub) => sub.text).join(" ")}
+  `;
 	const completion = await openai.chat.completions.create({
 		model: "gpt-4o-mini", // Use an appropriate model
 		messages: [
@@ -427,7 +327,7 @@ async function summarizeDescription(subtitles: Subtitle[], description: string):
 			},
 			{
 				role: "user",
-				content: subtitles.map((sub) => sub.text).join(" "),
+				content: content,
 			},
 		],
 		response_format: { type: "json_object" },
