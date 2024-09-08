@@ -39,17 +39,6 @@ jobs:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           message: "[fireship.pro] ${{ github.repository }} 📚 Dependencies installed"
-      - name: Run Prisma Migration
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DIRECT_URL: ${{ secrets.DIRECT_URL }}
-        run: npx prisma migrate deploy
-      - name: Send Telegram notification
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_CHAT_ID }}
-          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          message: "[fireship.pro] ${{ github.repository }} 🗃️ Prisma migration completed"
       - name: Deploy to Fly.io
         run: flyctl deploy
         env:
