@@ -235,6 +235,10 @@ async function checkAndUploadNewVideo(): Promise<void> {
 	}
 
 	const subtitles = await getSubtitles(video.id);
+	if (!subtitles) {
+		logger.error("No subtitles found");
+		return;
+	}
 	const fixedSubtitles = getFixedSubtitles(subtitles);
 	// const translatedSubs = await translateSubs(fixedSubtitles, "Russian");
 	const videoPath = await downloadVideo(video.id);
@@ -304,10 +308,14 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 	logger.info("Fetching subtitles", { videoId: id });
 	try {
 		const response = await axios.get(`https://www.youtube.com/watch?v=${id}`);
+		if (!response.data) throw new Error("Failed to fetch video");
+		if (typeof response.data !== "string") throw new Error("Invalid response data");
+		if (response.status !== 200) throw new Error("Failed to fetch video");
 		const html = response.data;
-
+		logger.info("HTML:", html);
 		// Extract the ytInitialPlayerResponse from the HTML
 		const match = html.match(/ytInitialPlayerResponse\s*=\s*({.*?});/);
+		logger.info("Match:", match);
 		if (!match) throw new Error("Failed to extract ytInitialPlayerResponse");
 
 		const playerResponse = JSON.parse(match[1]);
