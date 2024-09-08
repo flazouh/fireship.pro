@@ -1,9 +1,6 @@
-import { Subtitle, logger, openai } from "./bot";
+import { logger, openai } from "./bot";
 
-export async function summarizeDescription(
-	subtitles: Subtitle[],
-	description: string,
-): Promise<string> {
+export async function summarizeDescription(description: string): Promise<string> {
 	logger.info("Summarizing video description");
 	const completion = await openai.chat.completions.create({
 		model: "gpt-4o-mini", // Use an appropriate model
@@ -18,7 +15,7 @@ export async function summarizeDescription(
 			},
 			{
 				role: "user",
-				content: subtitles.map((sub) => sub.text).join(" "),
+				content: description,
 			},
 		],
 		response_format: { type: "json_object" },

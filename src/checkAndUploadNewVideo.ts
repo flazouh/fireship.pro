@@ -2,13 +2,9 @@ import {
 	logger,
 	getLatestFireshipVideo,
 	getLastUploadedVideoId,
-	getSubtitles,
-	downloadVideo,
-	addSubtitlesToVideo,
 	uploadVideoToTelegram,
 	setLastUploadedVideoId,
 } from "./bot";
-import { getFixedSubtitles } from "./getFixedSubtitles";
 
 export async function checkAndUploadNewVideo(): Promise<void> {
 	logger.info("Checking for new videos");
@@ -25,13 +21,8 @@ export async function checkAndUploadNewVideo(): Promise<void> {
 	}
 
 	try {
-		const subtitles = await getSubtitles(video.id);
-		const fixedSubtitles = getFixedSubtitles(subtitles);
-		// const translatedSubs = await translateSubs(fixedSubtitles, "Russian");
-		const videoPath = await downloadVideo(video.id);
-		const videoWithSubsPath = await addSubtitlesToVideo(videoPath, fixedSubtitles);
-		await uploadVideoToTelegram(videoWithSubsPath, video, fixedSubtitles);
-		await setLastUploadedVideoId(video.id);
+		await uploadVideoToTelegram(video);
+		await setLastUploadedVideoId(video.id, video.title);
 		logger.info("Video uploaded successfully", { videoId: video.id });
 	} catch (error) {
 		logger.error("Error uploading video", { videoId: video.id, error });
