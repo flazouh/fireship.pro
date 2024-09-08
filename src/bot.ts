@@ -172,7 +172,7 @@ interface Subtitle {
 async function uploadVideoToTelegram(
 	videoPath: string,
 	video: Video,
-	subtitles: Subtitle[],
+	subtitles: Subtitle[] | null,
 ): Promise<number> {
 	logger.info("Starting video upload to Telegram", { videoTitle: video.title });
 	try {
@@ -181,7 +181,7 @@ async function uploadVideoToTelegram(
 		const videoFile = { source: videoPath };
 		logger.info(`Uploading video to Telegram: ${video.title}`);
 
-		const descriptionSummary = await summarizeDescription(subtitles);
+		const descriptionSummary = await summarizeDescription(subtitles, video.description);
 		const message = await bot.telegram.sendVideo(VIDEO_CHANNEL_ID, videoFile, {
 			caption: `🎉 New Fireship video: \n\n${video.title}\n\n${descriptionSummary}`,
 		});
@@ -323,6 +323,7 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 		const captionTracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks;
 
 		if (!captionTracks || captionTracks.length === 0) {
+			logger.error(`No captions found for video ${id}`);
 			throw new Error("No captions found for this video");
 		}
 
@@ -410,7 +411,7 @@ function formatTime(seconds: number): string {
 	const ms = date.getUTCMilliseconds().toString().padStart(3, "0");
 	return `${hours}:${minutes}:${secs},${ms}`;
 }
-async function summarizeDescription(subtitles: Subtitle[]): Promise<string> {
+async function summarizeDescription(subtitles: Subtitle[], description: string): Promise<string> {
 	logger.info("Summarizing video description");
 	const completion = await openai.chat.completions.create({
 		model: "gpt-4o-mini", // Use an appropriate model
