@@ -14,14 +14,14 @@ jobs:
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          message: "[fireship.pro] ${{ github.repository }} 📦 Code checked out"
+          message: "${{ github.repository }} 📦 Code checked out"
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Send Telegram notification
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          message: "[fireship.pro] ${{ github.repository }} 🛠️ Flyctl set up"
+          message: "${{ github.repository }} 🛠️ Flyctl set up"
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -30,7 +30,7 @@ jobs:
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          message: "[fireship.pro] ${{ github.repository }} 📦 Node.js v20 set up"
+          message: "${{ github.repository }} 📦 Node.js v20 set up"
       - name: Install dependencies
         run: yarn install
       - name: Send Telegram notification
@@ -38,7 +38,7 @@ jobs:
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          message: "[fireship.pro] ${{ github.repository }} 📚 Dependencies installed"
+          message: "${{ github.repository }} 📚 Dependencies installed"
       - name: Deploy to Fly.io
         run: flyctl deploy
         env:
@@ -48,11 +48,11 @@ jobs:
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          message: "[fireship.pro] ${{ github.repository }} 🚀 Deployment to Fly.io completed"
+          message: "${{ github.repository }} 🚀 Deployment to Fly.io completed"
       - name: Send failure notification
         if: failure()
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          message: "[fireship.pro] ${{ github.repository }} ❌ Deployment failed. Please check the logs for more information."
+          message: "${{ github.repository }} ❌ Deployment failed. Please check the logs for more information."
