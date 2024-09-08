@@ -197,7 +197,8 @@ async function uploadVideoToTelegram(
 		throw error;
 	}
 }
-function getFixedSubtitles(subtitles: Subtitle[]): Subtitle[] {
+function getFixedSubtitles(subtitles: Subtitle[] | null): Subtitle[] {
+	if (!subtitles) return [];
 	// Sort subtitles by start time to ensure proper order
 	const sortedSubtitles = [...subtitles].sort((a, b) => a.startTime - b.startTime);
 	const fixedSubtitles: Subtitle[] = [];
@@ -235,10 +236,6 @@ async function checkAndUploadNewVideo(): Promise<void> {
 	}
 
 	const subtitles = await getSubtitles(video.id);
-	if (!subtitles) {
-		logger.error("No subtitles found");
-		return;
-	}
 	const fixedSubtitles = getFixedSubtitles(subtitles);
 	// const translatedSubs = await translateSubs(fixedSubtitles, "Russian");
 	const videoPath = await downloadVideo(video.id);
@@ -304,7 +301,7 @@ declare global {
 String.prototype.capitalize = function () {
 	return this.charAt(0).toUpperCase() + this.slice(1);
 };
-async function getSubtitles(id: string): Promise<Subtitle[]> {
+async function getSubtitles(id: string): Promise<Subtitle[] | null> {
 	logger.info("Fetching subtitles", { videoId: id });
 	try {
 		const response = await axios.get(`https://www.youtube.com/watch?v=${id}`);
@@ -323,8 +320,8 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 		const captionTracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks;
 
 		if (!captionTracks || captionTracks.length === 0) {
-			logger.error(`No captions found for video ${id}`);
-			throw new Error("No captions found for this video");
+			logger.error(`No captions found for video ${id}: ${JSON.stringify(html)}`);
+			return [];
 		}
 
 		// Prefer English captions, fallback to the first available
@@ -356,13 +353,17 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 	} catch (error) {
 		logger.error("Error fetching subtitles", { videoId: id, error });
 		console.error("Error fetching subtitles:", error);
-		throw error;
+		return [];
 	}
 }
 
-async function addSubtitlesToVideo(videoPath: string, translatedSubs: Subtitle[]): Promise<string> {
+async function addSubtitlesToVideo(
+	videoPath: string,
+	translatedSubs: Subtitle[] | null,
+): Promise<string> {
 	logger.info("Adding subtitles to video", { videoPath });
 	// Generate a temporary SRT file from translatedSubs
+	if (!translatedSubs) return videoPath;
 	const srtContent = translatedSubs
 		.map((sub, index) => {
 			const startTime = formatTime(sub.startTime);
