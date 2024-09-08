@@ -9,6 +9,8 @@ import OpenAI from "openai";
 import { Telegraf } from "telegraf";
 import { parseStringPromise } from "xml2js";
 import { JSDOM } from "jsdom";
+import winston from "winston";
+import DailyRotateFile from "winston-daily-rotate-file";
 
 config();
 
@@ -30,7 +32,32 @@ interface Video {
 	thumbnailUrl: string;
 }
 
+// Logger configuration
+const logger = winston.createLogger({
+	level: "info",
+	format: winston.format.combine(
+		winston.format.timestamp(),
+		winston.format.errors({ stack: true }),
+		winston.format.splat(),
+		winston.format.json(),
+	),
+	defaultMeta: { service: "telegram-bot" },
+	transports: [
+		new winston.transports.Console({
+			format: winston.format.combine(winston.format.colorize(), winston.format.simple()),
+		}),
+		new DailyRotateFile({
+			filename: "logs/application-%DATE%.log",
+			datePattern: "YYYY-MM-DD",
+			zippedArchive: true,
+			maxSize: "20m",
+			maxFiles: "14d",
+		}),
+	],
+});
+
 async function getLatestFireshipVideo(): Promise<Video | null> {
+	logger.info("Fetching latest Fireship video");
 	try {
 		const response = await axios.get(
 			`https://www.youtube.com/feeds/videos.xml?channel_id=${FIRESHIP_CHANNEL_ID}`,
@@ -40,6 +67,9 @@ async function getLatestFireshipVideo(): Promise<Video | null> {
 
 		if (!latestVideo) return null;
 
+		logger.info("Successfully fetched latest Fireship video", {
+			videoId: latestVideo["yt:videoId"][0],
+		});
 		return {
 			id: latestVideo["yt:videoId"][0],
 			title: latestVideo.title[0],
@@ -47,12 +77,13 @@ async function getLatestFireshipVideo(): Promise<Video | null> {
 			thumbnailUrl: `https://i.ytimg.com/vi/${latestVideo["yt:videoId"][0]}/hqdefault.jpg`,
 		};
 	} catch (error) {
-		console.error("Error fetching latest Fireship video:", error);
+		logger.error("Error fetching latest Fireship video", { error });
 		return null;
 	}
 }
 
 async function translateSubs(subtitles: Subtitle[], language: string): Promise<Subtitle[]> {
+	logger.info("Starting subtitle translation", { language, subtitleCount: subtitles.length });
 	if (!subtitles) return subtitles;
 	for (const subtitle of subtitles.slice(0, 5)) {
 		console.log("Translating subtitle:", subtitle.text);
@@ -92,6 +123,7 @@ async function translateSubs(subtitles: Subtitle[], language: string): Promise<S
 }
 
 async function downloadVideo(videoId: string): Promise<string> {
+	logger.info("Starting video download", { videoId });
 	console.log("Downloading video:", videoId);
 	const outputPath = `./temp_${videoId}.mp4`;
 	return new Promise((resolve, reject) => {
@@ -115,10 +147,12 @@ async function downloadVideo(videoId: string): Promise<string> {
 			.pipe(fs.createWriteStream(outputPath));
 
 		stream.on("finish", () => {
+			logger.info("Video download completed", { videoId, outputPath });
 			console.log("Download completed");
 			resolve(outputPath);
 		});
 		stream.on("error", (error) => {
+			logger.error("Video download error", { videoId, error });
 			console.error("Download error:", error);
 			reject(error);
 		});
@@ -130,6 +164,7 @@ interface Subtitle {
 	endTime: number;
 }
 async function uploadVideoToTelegram(videoPath: string, video: Video): Promise<number> {
+	logger.info("Starting video upload to Telegram", { videoTitle: video.title });
 	try {
 		console.log("Video path:", videoPath);
 
@@ -141,11 +176,13 @@ async function uploadVideoToTelegram(videoPath: string, video: Video): Promise<n
 			caption: `${video.title}\n${descriptionSummary}`,
 		});
 
+		logger.info("Video successfully uploaded to Telegram", { messageId: message.message_id });
 		console.log("Video uploaded to Telegram:", message);
 		console.log("Deleting temporary video file:", videoPath);
 		fs.unlinkSync(videoPath); // Delete the temporary video file
 		return message.message_id;
 	} catch (error) {
+		logger.error("Error uploading video to Telegram", { error });
 		console.error("Error uploading video to Telegram:", error);
 		throw error;
 	}
@@ -174,11 +211,18 @@ function getFixedSubtitles(subtitles: Subtitle[]): Subtitle[] {
 	return fixedSubtitles;
 }
 async function checkAndUploadNewVideo(): Promise<void> {
+	logger.info("Checking for new videos");
 	const video = await getLatestFireshipVideo();
-	if (!video) return;
+	if (!video) {
+		logger.error("No video found");
+		return;
+	}
 
 	const lastUploadedVideoId = await getLastUploadedVideoId();
-	if (video.id === lastUploadedVideoId) return;
+	if (video.id === lastUploadedVideoId) {
+		logger.info("No new videos found");
+		return;
+	}
 
 	const subtitles = await getSubtitles(video.id);
 	const fixedSubtitles = getFixedSubtitles(subtitles);
@@ -207,18 +251,21 @@ async function setLastUploadedVideoId(videoId: string): Promise<void> {
 
 // Update the main function to initialize Prisma
 async function main() {
+	logger.info("Starting bot");
 	await prisma.$connect();
+	logger.info("Database connection successful");
 	bot.launch();
-	console.log("Bot is running");
-	console.log("Database connection successful");
+	logger.info("Bot is running");
 	setInterval(checkAndUploadNewVideo, 60 * 60 * 1000); // Check every hour
-	console.log("Interval set");
-	console.log("Starting the bot...");
+	logger.info("Interval set for checking new videos");
+	logger.info("Starting the bot...");
 	checkAndUploadNewVideo();
 }
 
 // Run the main function
-main().catch(console.error);
+main().catch((error) => {
+	logger.error("Unhandled error in main function", { error });
+});
 
 // Enable graceful stop
 process.once("SIGINT", async () => {
@@ -238,6 +285,7 @@ String.prototype.capitalize = function () {
 	return this.charAt(0).toUpperCase() + this.slice(1);
 };
 async function getSubtitles(id: string): Promise<Subtitle[]> {
+	logger.info("Fetching subtitles", { videoId: id });
 	try {
 		const response = await axios.get(`https://www.youtube.com/watch?v=${id}`);
 		const html = response.data;
@@ -276,9 +324,11 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 				return { text, startTime, endTime };
 			})
 			.get();
+		logger.info("Subtitles fetched successfully", { videoId: id, subtitleCount: subtitles.length });
 		console.log(subtitles);
 		return subtitles.filter((subtitle) => subtitle !== null);
 	} catch (error) {
+		logger.error("Error fetching subtitles", { videoId: id, error });
 		console.error("Error fetching subtitles:", error);
 		throw error;
 	}
@@ -300,6 +350,7 @@ function cleanSubtitleText(text: string): string {
 }
 
 async function addSubtitlesToVideo(videoPath: string, translatedSubs: Subtitle[]): Promise<string> {
+	logger.info("Adding subtitles to video", { videoPath });
 	// Generate a temporary SRT file from translatedSubs
 	const srtContent = translatedSubs
 		.map((sub, index) => {
@@ -332,8 +383,10 @@ async function addSubtitlesToVideo(videoPath: string, translatedSubs: Subtitle[]
 		// Clean up temporary SRT file
 		await fs.promises.unlink(tempSrtPath);
 
+		logger.info("Subtitles added successfully", { outputPath });
 		return updatedVideo;
 	} catch (error) {
+		logger.error("Error adding subtitles to video", { videoPath, error });
 		console.error("Error adding subtitles to video:", error);
 		throw error;
 	}
@@ -348,6 +401,7 @@ function formatTime(seconds: number): string {
 	return `${hours}:${minutes}:${secs},${ms}`;
 }
 async function summarizeDescription(description: string) {
+	logger.info("Summarizing video description");
 	const completion = await openai.chat.completions.create({
 		model: "gpt-4o-mini", // Use an appropriate model
 		messages: [
