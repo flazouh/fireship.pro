@@ -1,0 +1,5 @@
+-- CreateTable
+CREATE TABLE "UploadedVideo" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "uploadedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
