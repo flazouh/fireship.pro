@@ -136,8 +136,9 @@ async function uploadVideoToTelegram(videoPath: string, video: Video): Promise<n
 		const videoFile = { source: videoPath };
 		console.log(`Uploading video to Telegram: ${video.title}`);
 
+		const descriptionSummary = await summarizeDescription(video.description);
 		const message = await bot.telegram.sendVideo(VIDEO_CHANNEL_ID, videoFile, {
-			caption: `${video.title}\n${video.description}`,
+			caption: `${video.title}\n${descriptionSummary}`,
 		});
 
 		console.log("Video uploaded to Telegram:", message);
@@ -228,7 +229,14 @@ process.once("SIGTERM", async () => {
 	bot.stop("SIGTERM");
 	await prisma.$disconnect();
 });
-
+declare global {
+	interface String {
+		capitalize(): string;
+	}
+}
+String.prototype.capitalize = function () {
+	return this.charAt(0).toUpperCase() + this.slice(1);
+};
 async function getSubtitles(id: string): Promise<Subtitle[]> {
 	try {
 		const response = await axios.get(`https://www.youtube.com/watch?v=${id}`);
@@ -258,7 +266,7 @@ async function getSubtitles(id: string): Promise<Subtitle[]> {
 
 		const subtitles = textNodes
 			.map((i, node) => {
-				const text = cleanSubtitleText($(node).text());
+				const text = cleanSubtitleText($(node).text()).capitalize();
 				const startString = $(node).attr("start") || "0";
 				const durationString = $(node).attr("dur") || "0";
 				console.log("Subtitle:", text, startString, durationString);
@@ -338,4 +346,25 @@ function formatTime(seconds: number): string {
 	const secs = date.getUTCSeconds().toString().padStart(2, "0");
 	const ms = date.getUTCMilliseconds().toString().padStart(3, "0");
 	return `${hours}:${minutes}:${secs},${ms}`;
+}
+async function summarizeDescription(description: string) {
+	const completion = await openai.chat.completions.create({
+		model: "gpt-4o-mini", // Use an appropriate model
+		messages: [
+			{
+				role: "system",
+				content: JSON.stringify({
+					role: "AI assistant",
+					task: "Summarize the description",
+					instructions: `Provide only the summary of the description in JSON format ({"summary": "..."})`,
+				}),
+			},
+			{
+				role: "user",
+				content: description,
+			},
+		],
+		response_format: { type: "json_object" },
+	});
+	return completion.choices[0].message.content;
 }
