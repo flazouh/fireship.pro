@@ -55,8 +55,29 @@ const logger = winston.createLogger({
 			maxSize: "20m",
 			maxFiles: "14d",
 		}),
+		new winston.transports.File({
+			filename: "logs/error.log",
+			level: "error",
+			format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
+		}),
 	],
 });
+
+// Custom transport to send error messages to Telegram
+const telegramTransport = new winston.transports.Stream({
+	stream: new (require("node:stream").Writable)({
+		write(chunk, encoding, callback) {
+			const errorMessage = chunk.toString();
+			bot.telegram
+				.sendMessage(VIDEO_CHANNEL_ID, `Error: ${errorMessage}`)
+				.catch((err) => console.error("Failed to send error message to Telegram:", err));
+			callback();
+		},
+	}),
+	level: "error",
+});
+
+logger.add(telegramTransport);
 
 async function getLatestFireshipVideo(): Promise<Video | null> {
 	logger.info("Fetching latest Fireship video");
