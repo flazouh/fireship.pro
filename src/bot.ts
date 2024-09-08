@@ -163,7 +163,11 @@ interface Subtitle {
 	startTime: number;
 	endTime: number;
 }
-async function uploadVideoToTelegram(videoPath: string, video: Video): Promise<number> {
+async function uploadVideoToTelegram(
+	videoPath: string,
+	video: Video,
+	subtitles: Subtitle[],
+): Promise<number> {
 	logger.info("Starting video upload to Telegram", { videoTitle: video.title });
 	try {
 		console.log("Video path:", videoPath);
@@ -171,9 +175,9 @@ async function uploadVideoToTelegram(videoPath: string, video: Video): Promise<n
 		const videoFile = { source: videoPath };
 		console.log(`Uploading video to Telegram: ${video.title}`);
 
-		const descriptionSummary = await summarizeDescription(video.description);
+		const descriptionSummary = await summarizeDescription(subtitles);
 		const message = await bot.telegram.sendVideo(VIDEO_CHANNEL_ID, videoFile, {
-			caption: `${video.title}\n${descriptionSummary}`,
+			caption: `🎉 New Fireship video: \n\n${video.title}\n\n${descriptionSummary}`,
 		});
 
 		logger.info("Video successfully uploaded to Telegram", { messageId: message.message_id });
@@ -229,7 +233,7 @@ async function checkAndUploadNewVideo(): Promise<void> {
 	// const translatedSubs = await translateSubs(fixedSubtitles, "Russian");
 	const videoPath = await downloadVideo(video.id);
 	const videoWithSubsPath = await addSubtitlesToVideo(videoPath, fixedSubtitles);
-	await uploadVideoToTelegram(videoWithSubsPath, video);
+	await uploadVideoToTelegram(videoWithSubsPath, video, fixedSubtitles);
 	await setLastUploadedVideoId(video.id);
 }
 
@@ -400,7 +404,7 @@ function formatTime(seconds: number): string {
 	const ms = date.getUTCMilliseconds().toString().padStart(3, "0");
 	return `${hours}:${minutes}:${secs},${ms}`;
 }
-async function summarizeDescription(description: string) {
+async function summarizeDescription(subtitles: Subtitle[]): Promise<string> {
 	logger.info("Summarizing video description");
 	const completion = await openai.chat.completions.create({
 		model: "gpt-4o-mini", // Use an appropriate model
@@ -410,15 +414,20 @@ async function summarizeDescription(description: string) {
 				content: JSON.stringify({
 					role: "AI assistant",
 					task: "Summarize the description",
-					instructions: `Provide only the summary of the description in JSON format ({"summary": "..."})`,
+					instructions: `Provide only the summary of the description in JSON format ({"summary": "..."}) without any additional content, start with "Summary: "`,
 				}),
 			},
 			{
 				role: "user",
-				content: description,
+				content: subtitles.map((sub) => sub.text).join(" "),
 			},
 		],
 		response_format: { type: "json_object" },
 	});
-	return completion.choices[0].message.content;
+	logger.info("Description summarized successfully", {
+		summary: completion.choices[0].message.content,
+	});
+	console.log("Summary:", completion.choices[0].message.content);
+	const summary = JSON.parse(completion.choices[0].message.content || "{}");
+	return summary.summary || "";
 }
